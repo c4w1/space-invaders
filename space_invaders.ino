@@ -13,7 +13,7 @@ SoftwareSerial HM10(10, 11);  // RX (pin 10), TX (pin 11)
 
 // Speaker and LED pins
 #define SHOOT_PIN 8
-#define UFO_ENEMY_PIN 9  // Already corrected to match your speaker on pin 9
+#define UFO_ENEMY_PIN 9
 #define EXPLOSION_PIN 12
 #define LED_LEFT 5
 #define LED_RIGHT 6
