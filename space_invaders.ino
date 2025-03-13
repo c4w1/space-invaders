@@ -12,7 +12,9 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 SoftwareSerial HM10(10, 11);  // RX (pin 10), TX (pin 11)
 
 // Speaker and LED pins
-#define SPEAKER_PIN 8
+#define SHOOT_PIN 8
+#define UFO_ENEMY_PIN 9  // Already corrected to match your speaker on pin 9
+#define EXPLOSION_PIN 12
 #define LED_LEFT 5
 #define LED_RIGHT 6
 #define LED_SHOOT 7
@@ -35,12 +37,12 @@ SoftwareSerial HM10(10, 11);  // RX (pin 10), TX (pin 11)
 #define BUNKER_WIDTH 8
 #define BUNKER_HEIGHT 6
 #define NUM_BUNKERS 4
-#define PLAYER_DESTROYED_DURATION 1000  // 1 second delay for destroyed player
+#define PLAYER_DESTROYED_DURATION 1000
 #define LIFE_ICON_WIDTH 8
 #define LIFE_ICON_HEIGHT 5
 #define MAX_LIVES 3
-#define LIVES_SCREEN_DURATION 2000  // 2 seconds for lives screen
-#define UFO_SOUND_INTERVAL 200  // UFO sound toggle every 200ms
+#define LIVES_SCREEN_DURATION 2000
+#define UFO_SOUND_INTERVAL 200  // Increased to 200 ms for authentic UFO siren
 #define PLAYER_PROJECTILE_WIDTH 1
 #define PLAYER_PROJECTILE_HEIGHT 5
 #define ALIEN_PROJECTILE_WIDTH 4
@@ -51,7 +53,7 @@ struct Projectile {
   int x, y;
   bool active;
   bool isAlien;
-  byte type;  // For alien projectiles: 0 (dot), 1 (squiggly), 2 (double-segment)
+  byte type;
 };
 struct Alien {
   int x, y;
@@ -70,7 +72,7 @@ struct UFO {
 };
 struct Bunker {
   int x, y;
-  byte damageLevel;  // 0 (full) to 4 (destroyed)
+  byte damageLevel;
 };
 struct Player {
   int x;
@@ -83,6 +85,16 @@ struct Player {
   bool shoot;
 };
 
+// Sound structure
+struct Sound {
+  int pin;
+  unsigned long period;        // in microseconds
+  unsigned long lastToggle;    // in microseconds
+  bool active;
+  unsigned long endTimeMillis; // in milliseconds
+  bool state;                  // current pin state
+};
+
 // Game variables
 Projectile projectiles[MAX_PROJECTILES + MAX_ALIEN_PROJECTILES];
 Alien aliens[NUM_ALIENS];
@@ -90,14 +102,14 @@ Explosion explosion;
 UFO ufo = {0, false, true};
 Bunker bunkers[NUM_BUNKERS];
 Player players[2] = {
-  {SCREEN_WIDTH / 2 - PLAYER_WIDTH / 2, 0, MAX_LIVES, false, 0, false, false, false},  // Player 1
-  {SCREEN_WIDTH / 2 - PLAYER_WIDTH / 2, 0, MAX_LIVES, false, 0, false, false, false}   // Player 2
+  {SCREEN_WIDTH / 2 - PLAYER_WIDTH / 2, 0, MAX_LIVES, false, 0, false, false, false},
+  {SCREEN_WIDTH / 2 - PLAYER_WIDTH / 2, 0, MAX_LIVES, false, 0, false, false, false}
 };
 int aliensAlive = NUM_ALIENS;
 bool aliensMoveRight = true;
 int baseMoveInterval = 500;
 bool isMultiplayer = false;
-int currentPlayer = 0;  // 0 for Player 1, 1 for Player 2
+int currentPlayer = 0;
 bool ufoSoundHigh = false;
 unsigned long lastUfoSoundToggle = 0;
 
@@ -108,65 +120,43 @@ unsigned long lastAlienMove = 0;
 byte alienMoveSoundIndex = 0;
 unsigned long lastUFOSpawn = 0;
 
-// Flag for continuous shoot tone
-bool shootToneActive = false;
+// Sound channels
+Sound shootSound = {SHOOT_PIN, 0, 0, false, 0, LOW};
+Sound ufoEnemySound = {UFO_ENEMY_PIN, 0, 0, false, 0, LOW};
+Sound explosionSound = {EXPLOSION_PIN, 0, 0, false, 0, LOW};
 
 // Sprites in PROGMEM
-const uint16_t playerSprite[PLAYER_HEIGHT] PROGMEM = {
-  0x010, 0x038, 0x07C, 0x0FE, 0x1FF, 0x3FF, 0x3FF
-};
-const uint16_t playerDestroyedSprite[PLAYER_HEIGHT] PROGMEM = {
-  0x091, 0x122, 0x244, 0x088, 0x155, 0x222, 0x091  // Scattered debris
-};
-const byte lifeIconSprite[LIFE_ICON_HEIGHT] PROGMEM = {
-  0x08, 0x1C, 0x3E, 0x7F, 0x7F  // Small ship for lives
-};
-const byte lifeDestroyedSprite[LIFE_ICON_HEIGHT] PROGMEM = {
-  0x14, 0x22, 0x08, 0x55, 0x22  // Debris for destroyed life
-};
-const byte playerProjectileSprite[PLAYER_PROJECTILE_HEIGHT] PROGMEM = {
-  0x01, 0x01, 0x01, 0x01, 0x01  // Thin, straight laser bolt (1x5)
-};
+const uint16_t playerSprite[PLAYER_HEIGHT] PROGMEM = {0x010, 0x038, 0x07C, 0x0FE, 0x1FF, 0x3FF, 0x3FF};
+const uint16_t playerDestroyedSprite[PLAYER_HEIGHT] PROGMEM = {0x091, 0x122, 0x244, 0x088, 0x155, 0x222, 0x091};
+const byte lifeIconSprite[LIFE_ICON_HEIGHT] PROGMEM = {0x08, 0x1C, 0x3E, 0x7F, 0x7F};
+const byte lifeDestroyedSprite[LIFE_ICON_HEIGHT] PROGMEM = {0x14, 0x22, 0x08, 0x55, 0x22};
+const byte playerProjectileSprite[PLAYER_PROJECTILE_HEIGHT] PROGMEM = {0x01, 0x01, 0x01, 0x01, 0x01};
 const byte alienProjectileSprites[3][ALIEN_PROJECTILE_HEIGHT] PROGMEM = {
-  {0x06, 0x06, 0x06, 0x06, 0x06, 0x06},  // Dot/pellet (4x6, small square)
-  {0x02, 0x05, 0x0A, 0x04, 0x09, 0x06},  // Squiggly/wavy (4x6, twisting)
-  {0x06, 0x06, 0x00, 0x06, 0x06, 0x00}   // Double-segment (4x6, two parts)
+  {0x06, 0x06, 0x06, 0x06, 0x06, 0x06},
+  {0x02, 0x05, 0x0A, 0x04, 0x09, 0x06},
+  {0x06, 0x06, 0x00, 0x06, 0x06, 0x00}
 };
 const byte alienSprites[3][2][ALIEN_HEIGHT] PROGMEM = {
-  { 
-    {0x18, 0x3C, 0x7E, 0xDB, 0xFF, 0x24, 0x5A, 0x81},  // Type 0 (30 pts)
-    {0x18, 0x3C, 0x7E, 0xDB, 0xFF, 0x42, 0xA5, 0x42}
-  },
-  { 
-    {0x00, 0x3C, 0x7E, 0xDB, 0xFF, 0x5A, 0x81, 0x42},  // Type 1 (20 pts)
-    {0x00, 0x3C, 0x7E, 0xDB, 0xFF, 0x24, 0x5A, 0xA5}
-  },
-  { 
-    {0x3C, 0x7E, 0xFF, 0xDB, 0xFF, 0x18, 0x24, 0x42},  // Type 2 (10 pts)
-    {0x3C, 0x7E, 0xFF, 0xDB, 0xFF, 0x18, 0x42, 0x81}
-  }
+  {{0x18, 0x3C, 0x7E, 0xDB, 0xFF, 0x24, 0x5A, 0x81}, {0x18, 0x3C, 0x7E, 0xDB, 0xFF, 0x42, 0xA5, 0x42}},
+  {{0x00, 0x3C, 0x7E, 0xDB, 0xFF, 0x5A, 0x81, 0x42}, {0x00, 0x3C, 0x7E, 0xDB, 0xFF, 0x24, 0x5A, 0xA5}},
+  {{0x3C, 0x7E, 0xFF, 0xDB, 0xFF, 0x18, 0x24, 0x42}, {0x3C, 0x7E, 0xFF, 0xDB, 0xFF, 0x18, 0x42, 0x81}}
 };
-const byte explosionSprite[EXPLOSION_HEIGHT] PROGMEM = {
-  0x14, 0x22, 0x5D, 0xA5, 0xA5, 0x5D, 0x22, 0x14
-};
-const byte ufoSprite[UFO_HEIGHT] PROGMEM = {
-  0x10, 0x7C, 0xFE, 0x7C, 0x10
-};
+const byte explosionSprite[EXPLOSION_HEIGHT] PROGMEM = {0x14, 0x22, 0x5D, 0xA5, 0xA5, 0x5D, 0x22, 0x14};
+const byte ufoSprite[UFO_HEIGHT] PROGMEM = {0x10, 0x7C, 0xFE, 0x7C, 0x10};
 const byte bunkerSprites[5][BUNKER_HEIGHT] PROGMEM = {
-  {0x3C, 0x7E, 0xFF, 0xFF, 0xFF, 0xFF},  // Full
-  {0x38, 0x7C, 0xFE, 0xFF, 0xFF, 0xFF},  // Slightly damaged
-  {0x30, 0x58, 0xFE, 0xFD, 0xFF, 0xFE},  // Moderately damaged
-  {0x20, 0x50, 0xF8, 0xF4, 0xFE, 0xE8},  // Heavily damaged
-  {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}   // Destroyed
+  {0x3C, 0x7E, 0xFF, 0xFF, 0xFF, 0xFF},
+  {0x38, 0x7C, 0xFE, 0xFF, 0xFF, 0xFF},
+  {0x30, 0x58, 0xFE, 0xFD, 0xFF, 0xFE},
+  {0x20, 0x50, 0xF8, 0xF4, 0xFE, 0xE8},
+  {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 };
 
 // Input flags
 bool gameStarted = false;
 
-// Alien movement tones
-const int alienMoveTones[4] = {120, 100, 80, 60};
-// UFO sound tones
-const int ufoTones[2] = {800, 600};  // High-low pitch pattern
+// Tones
+const int alienMoveTones[4] = {120, 100, 80, 60};  // Authentic alien march tones
+const int ufoTones[2] = {900, 700};  // Authentic UFO siren tones
 
 void showScoreTableAnimation() {
   display.clearDisplay();
@@ -241,6 +231,8 @@ void showScoreTableAnimation() {
     display.display();
     delay(200);
   }
+  display.fillRect(0, 0, 16, 16, SSD1306_BLACK);  // Patchwork fix for garbage
+  display.display();
   delay(1000);
 }
 
@@ -260,8 +252,9 @@ void attractMode() {
       display.setCursor(coinX, coinY);
       display.print("INSERT COIN");
       display.setCursor(coinX - 12, coinY + 10);
-      display.print("B1: 1P  B2: 2P");
+      display.print("1P          2P");
     }
+    display.fillRect(0, 0, 24, 16, SSD1306_BLACK);  // Patchwork fix for garbage output
     display.display();
 
     if (millis() - lastLedChange > 500) {
@@ -506,7 +499,12 @@ void triggerExplosion(int x, int y) {
   explosion.y = y - EXPLOSION_HEIGHT / 2;
   explosion.startTime = millis();
   explosion.active = true;
-  tone(SPEAKER_PIN, 200, 150);
+  explosionSound.period = 1000000 / 200;  // 200 Hz for alien explosion
+  explosionSound.lastToggle = micros();
+  explosionSound.state = HIGH;
+  digitalWrite(explosionSound.pin, HIGH);
+  explosionSound.active = true;
+  explosionSound.endTimeMillis = millis() + 200;  // 200 ms duration
 }
 
 bool isAlienBlocked(int alienIndex) {
@@ -516,7 +514,6 @@ bool isAlienBlocked(int alienIndex) {
     if (i != alienIndex && aliens[i].alive) {
       int otherX = aliens[i].x;
       int otherY = aliens[i].y;
-      // Check if another alien is below and in the same column
       if (otherY > shooterY && 
           otherX + ALIEN_WIDTH > shooterX && 
           otherX < shooterX + ALIEN_WIDTH) {
@@ -536,20 +533,18 @@ void updateGame() {
         gameOver();
         return;
       } else if (isMultiplayer) {
-        currentPlayer = (currentPlayer + 1) % 2;  // Switch players
-        while (players[currentPlayer].lives <= 0) {  // Skip dead players
+        currentPlayer = (currentPlayer + 1) % 2;
+        while (players[currentPlayer].lives <= 0) {
           currentPlayer = (currentPlayer + 1) % 2;
-          if (players[0].lives <= 0 && players[1].lives <= 0) {
-            gameOver();
-            return;
-          }
+          if (players[0].lives <= 0 && players[1].lives <= 0) gameOver();
         }
       }
-      initGame();  // Restart with new player or same player in 1P
+      initGame();
     }
     return;
   }
 
+  // Player movement
   if (players[currentPlayer].moveLeft && players[currentPlayer].x > 0) {
     players[currentPlayer].x -= 3;
     digitalWrite(LED_LEFT, HIGH);
@@ -562,35 +557,39 @@ void updateGame() {
   } else {
     digitalWrite(LED_RIGHT, LOW);
   }
-  
+
+  // Shooting
   if (players[currentPlayer].shoot) {
     if (!projectiles[0].active) {
       projectiles[0].x = players[currentPlayer].x + PLAYER_WIDTH / 2;
       projectiles[0].y = 63 - PLAYER_HEIGHT - PLAYER_PROJECTILE_HEIGHT;
       projectiles[0].active = true;
       projectiles[0].isAlien = false;
-      projectiles[0].type = 0;  // Not used for player
+      projectiles[0].type = 0;
       players[currentPlayer].shoot = false;
-      tone(SPEAKER_PIN, 1000);
-      shootToneActive = true;
+      shootSound.period = 1000000 / 1200;  // 1200 Hz for authentic shoot sound
+      shootSound.lastToggle = micros();
+      shootSound.state = HIGH;
+      digitalWrite(shootSound.pin, HIGH);
+      shootSound.active = true;
+      shootSound.endTimeMillis = millis() + 100;  // 100 ms duration
       digitalWrite(LED_SHOOT, HIGH);
     }
   } else {
     digitalWrite(LED_SHOOT, LOW);
   }
-  
+
+  // Projectile movement
   if (projectiles[0].active && !projectiles[0].isAlien) {
-    projectiles[0].y -= 3;  // Fast upward movement
+    projectiles[0].y -= 3;
     if (projectiles[0].y + PLAYER_PROJECTILE_HEIGHT <= 0) {
       triggerExplosion(projectiles[0].x, 0);
       projectiles[0].active = false;
+      shootSound.active = false;
     }
   }
-  if (!projectiles[0].active && shootToneActive) {
-    noTone(SPEAKER_PIN);
-    shootToneActive = false;
-  }
-  
+
+  // Alien projectiles
   bool alienProjectileActive = false;
   for (int i = MAX_PROJECTILES; i < MAX_PROJECTILES + MAX_ALIEN_PROJECTILES; i++) {
     if (projectiles[i].active) {
@@ -609,7 +608,7 @@ void updateGame() {
               projectiles[i].y = aliens[randomAlien].y + ALIEN_HEIGHT;
               projectiles[i].active = true;
               projectiles[i].isAlien = true;
-              projectiles[i].type = random(3);  // Randomly select: 0 (dot), 1 (squiggly), 2 (double)
+              projectiles[i].type = random(3);
               break;
             }
           }
@@ -618,16 +617,17 @@ void updateGame() {
       }
     }
   }
-  
+
   for (int i = MAX_PROJECTILES; i < MAX_PROJECTILES + MAX_ALIEN_PROJECTILES; i++) {
     if (projectiles[i].active && projectiles[i].isAlien) {
-      projectiles[i].y += 1;  // Slow downward movement
+      projectiles[i].y += 1;
       if (projectiles[i].y >= SCREEN_HEIGHT) {
         projectiles[i].active = false;
       }
     }
   }
-  
+
+  // Alien movement
   int moveInterval = baseMoveInterval - ((baseMoveInterval - 50) * (NUM_ALIENS - aliensAlive) / NUM_ALIENS);
   if (millis() - lastAlienMove > moveInterval) {
     lastAlienMove = millis();
@@ -649,16 +649,24 @@ void updateGame() {
       }
     }
     if (edgeHit) aliensMoveRight = !aliensMoveRight;
-    if (!shootToneActive && !ufo.active)
-      tone(SPEAKER_PIN, alienMoveTones[alienMoveSoundIndex], 50);
+    if (!ufo.active) {
+      ufoEnemySound.period = 1000000 / alienMoveTones[alienMoveSoundIndex];
+      ufoEnemySound.lastToggle = micros();
+      ufoEnemySound.state = HIGH;
+      digitalWrite(ufoEnemySound.pin, HIGH);
+      ufoEnemySound.active = true;
+      ufoEnemySound.endTimeMillis = millis() + 50;  // 50 ms for alien move sound
+    }
     alienMoveSoundIndex = (alienMoveSoundIndex + 1) % 4;
   }
-  
+
+  // Animation
   if (millis() - lastFrameChange > 500) {
     lastFrameChange = millis();
     animationFrame = 1 - animationFrame;
   }
-  
+
+  // UFO
   if (!ufo.active && (millis() - lastUFOSpawn > random(15000, 25000))) {
     ufo.x = 0;
     ufo.active = true;
@@ -666,19 +674,26 @@ void updateGame() {
     lastUFOSpawn = millis();
     lastUfoSoundToggle = millis();
     ufoSoundHigh = true;
+    ufoEnemySound.period = 1000000 / ufoTones[0];
+    ufoEnemySound.lastToggle = micros();
+    ufoEnemySound.state = HIGH;
+    digitalWrite(ufoEnemySound.pin, HIGH);
+    ufoEnemySound.active = true;
+    ufoEnemySound.endTimeMillis = 0xFFFFFFFF;
   }
   if (ufo.active) {
     ufo.x += ufo.movingRight ? 2 : -2;
     if (ufo.x <= 0 || ufo.x >= SCREEN_WIDTH - UFO_WIDTH) {
       ufo.active = false;
-      noTone(SPEAKER_PIN);
-    } else if (!shootToneActive && millis() - lastUfoSoundToggle > UFO_SOUND_INTERVAL) {
+      ufoEnemySound.active = false;
+    } else if (millis() - lastUfoSoundToggle > UFO_SOUND_INTERVAL) {
       ufoSoundHigh = !ufoSoundHigh;
-      tone(SPEAKER_PIN, ufoTones[ufoSoundHigh ? 0 : 1], UFO_SOUND_INTERVAL);
+      ufoEnemySound.period = 1000000 / ufoTones[ufoSoundHigh ? 0 : 1];
       lastUfoSoundToggle = millis();
     }
   }
-  
+
+  // Collisions
   for (int i = 0; i < MAX_PROJECTILES + MAX_ALIEN_PROJECTILES; i++) {
     if (projectiles[i].active) {
       int projWidth = projectiles[i].isAlien ? ALIEN_PROJECTILE_WIDTH : PLAYER_PROJECTILE_WIDTH;
@@ -693,6 +708,7 @@ void updateGame() {
             triggerExplosion(projectiles[i].x, projectiles[i].y + projHeight / 2);
             aliens[j].alive = false;
             projectiles[i].active = false;
+            shootSound.active = false;
             aliensAlive--;
             players[currentPlayer].score += 10 * (3 - aliens[j].type);
             break;
@@ -705,11 +721,11 @@ void updateGame() {
             projectiles[i].y + projHeight > 2) {
           triggerExplosion(projectiles[i].x, projectiles[i].y + projHeight / 2);
           ufo.active = false;
+          ufoEnemySound.active = false;
           projectiles[i].active = false;
+          shootSound.active = false;
           players[currentPlayer].score += 100;
-          noTone(SPEAKER_PIN);
         }
-        // Check for collision with alien projectiles
         for (int j = MAX_PROJECTILES; j < MAX_PROJECTILES + MAX_ALIEN_PROJECTILES; j++) {
           if (projectiles[j].active && projectiles[j].isAlien &&
               projectiles[i].x >= projectiles[j].x &&
@@ -718,6 +734,7 @@ void updateGame() {
               projectiles[i].y + projHeight > projectiles[j].y) {
             triggerExplosion(projectiles[i].x, projectiles[i].y + projHeight / 2);
             projectiles[i].active = false;
+            shootSound.active = false;
             projectiles[j].active = false;
             break;
           }
@@ -728,7 +745,12 @@ void updateGame() {
                  projectiles[i].y + projHeight > 57) {
         players[currentPlayer].destroyed = true;
         players[currentPlayer].destroyedTime = millis();
-        tone(SPEAKER_PIN, 300, 500);
+        explosionSound.period = 1000000 / 150;  // 150 Hz for player destruction
+        explosionSound.lastToggle = micros();
+        explosionSound.state = HIGH;
+        digitalWrite(explosionSound.pin, HIGH);
+        explosionSound.active = true;
+        explosionSound.endTimeMillis = millis() + 300;  // 300 ms duration
         projectiles[i].active = false;
       }
       for (int k = 0; k < NUM_BUNKERS; k++) {
@@ -739,17 +761,15 @@ void updateGame() {
             projectiles[i].y + projHeight > bunkers[k].y) {
           damageBunker(k);
           projectiles[i].active = false;
+          if (!projectiles[i].isAlien) shootSound.active = false;
           break;
         }
       }
     }
   }
-  
+
   if (aliensAlive == 0) initGame();
-  
-  if (explosion.active && (millis() - explosion.startTime > EXPLOSION_DURATION)) {
-    explosion.active = false;
-  }
+  if (explosion.active && (millis() - explosion.startTime > EXPLOSION_DURATION)) explosion.active = false;
 }
 
 void drawGame() {
@@ -830,22 +850,68 @@ void parseBluetooth() {
   }
 }
 
+void toggleSounds() {
+  unsigned long currentMicros = micros();
+  unsigned long currentMillis = millis();
+
+  // Shoot sound
+  if (shootSound.active && currentMillis < shootSound.endTimeMillis) {
+    if (currentMicros - shootSound.lastToggle >= shootSound.period / 2) {
+      shootSound.state = !shootSound.state;
+      digitalWrite(shootSound.pin, shootSound.state);
+      shootSound.lastToggle = currentMicros;
+    }
+  } else if (shootSound.active) {
+    shootSound.active = false;
+    digitalWrite(shootSound.pin, LOW);
+  }
+
+  // UFO/Enemy sound
+  if (ufoEnemySound.active && currentMillis < ufoEnemySound.endTimeMillis) {
+    if (currentMicros - ufoEnemySound.lastToggle >= ufoEnemySound.period / 2) {
+      ufoEnemySound.state = !ufoEnemySound.state;
+      digitalWrite(ufoEnemySound.pin, ufoEnemySound.state);
+      ufoEnemySound.lastToggle = currentMicros;
+    }
+  } else if (ufoEnemySound.active) {
+    ufoEnemySound.active = false;
+    digitalWrite(ufoEnemySound.pin, LOW);
+  }
+
+  // Explosion sound
+  if (explosionSound.active && currentMillis < explosionSound.endTimeMillis) {
+    if (currentMicros - explosionSound.lastToggle >= explosionSound.period / 2) {
+      explosionSound.state = !explosionSound.state;
+      digitalWrite(explosionSound.pin, explosionSound.state);
+      explosionSound.lastToggle = currentMicros;
+    }
+  } else if (explosionSound.active) {
+    explosionSound.active = false;
+    digitalWrite(explosionSound.pin, LOW);
+  }
+}
+
 void setup() {
-  pinMode(SPEAKER_PIN, OUTPUT);
+  pinMode(SHOOT_PIN, OUTPUT);
+  pinMode(UFO_ENEMY_PIN, OUTPUT);
+  pinMode(EXPLOSION_PIN, OUTPUT);
   pinMode(LED_LEFT, OUTPUT);
   pinMode(LED_RIGHT, OUTPUT);
   pinMode(LED_SHOOT, OUTPUT);
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    while (1);
-  }
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) while (1);
   display.setRotation(2);
   HM10.begin(9600);
   attractMode();
 }
 
 void loop() {
-  parseBluetooth();
-  updateGame();
-  drawGame();
-  delay(16);
+  static unsigned long lastFrame = 0;
+  toggleSounds();  // Run as fast as possible
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastFrame >= 16) {
+    lastFrame = currentMillis;
+    parseBluetooth();
+    updateGame();
+    drawGame();
+  }
 }
